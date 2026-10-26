@@ -96,6 +96,9 @@ const adminSchema = z.object({
 });
 
 const declarativeConfigSchema = z.object({
+  version: z.number().optional(),
+  exportedAt: z.string().optional(),
+  source: z.string().optional(),
   admin: adminSchema.optional(),
   // Premium license key (freellmapi.co). Same minimum as the dashboard's
   // POST /api/premium/key length gate.
@@ -115,7 +118,8 @@ const declarativeConfigSchema = z.object({
     // which ranks models. Omitted leaves the persisted value alone.
     keySelectionStrategy: z.enum(['auto', 'least-remaining']).optional(),
   }).optional(),
-}).strict();
+  unifiedApiKey: z.string().optional(),
+}).passthrough();
 
 export type DeclarativeConfig = z.infer<typeof declarativeConfigSchema>;
 
@@ -148,12 +152,50 @@ interface NormalizedCustomModel {
   fallbackEnabled?: boolean;
 }
 
+function injectAdminFromEnvIfNeeded(obj: any): any {
+  if (obj && typeof obj === 'object') {
+    if (!obj.admin && process.env.ADMIN_EMAIL?.trim() && process.env.ADMIN_PASSWORD?.trim()) {
+      obj.admin = {
+        email: process.env.ADMIN_EMAIL.trim(),
+        password: process.env.ADMIN_PASSWORD.trim(),
+      };
+    }
+  }
+  return obj;
+}
+
 function readConfigFromEnv(): { source: string; value: unknown } | null {
   const inline = process.env.FREEAPI_CONFIG_JSON?.trim();
-  if (inline) return { source: 'FREEAPI_CONFIG_JSON', value: JSON.parse(inline) };
+  if (inline) {
+    try {
+      const parsed = injectAdminFromEnvIfNeeded(JSON.parse(inline));
+      return { source: 'FREEAPI_CONFIG_JSON', value: parsed };
+    } catch (e: any) {
+      console.warn('[config] failed to parse FREEAPI_CONFIG_JSON:', e?.message || e);
+    }
+  }
 
   const configPath = process.env.FREEAPI_CONFIG_PATH?.trim();
-  if (configPath) return { source: configPath, value: JSON.parse(fs.readFileSync(configPath, 'utf8')) };
+  if (configPath) {
+    try {
+      const parsed = injectAdminFromEnvIfNeeded(JSON.parse(fs.readFileSync(configPath, 'utf8')));
+      return { source: configPath, value: parsed };
+    } catch (e: any) {
+      console.warn('[config] failed to read FREEAPI_CONFIG_PATH:', e?.message || e);
+    }
+  }
+
+  if (process.env.ADMIN_EMAIL?.trim() && process.env.ADMIN_PASSWORD?.trim()) {
+    return {
+      source: 'ADMIN_EMAIL/ADMIN_PASSWORD env',
+      value: {
+        admin: {
+          email: process.env.ADMIN_EMAIL.trim(),
+          password: process.env.ADMIN_PASSWORD.trim(),
+        },
+      },
+    };
+  }
 
   return null;
 }
@@ -521,6 +563,10 @@ export function applyDeclarativeConfig(input: unknown, source = 'inline'): Decla
         setKeySelectionStrategy(parsed.data.routing.keySelectionStrategy);
       }
       result.routing = true;
+    }
+    const desiredUnifiedKey = process.env.UNIFIED_API_KEY?.trim() || parsed.data.unifiedApiKey?.trim();
+    if (desiredUnifiedKey) {
+      setSetting('unified_api_key', desiredUnifiedKey);
     }
   });
   apply();
